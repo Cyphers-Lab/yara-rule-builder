@@ -6,13 +6,24 @@ const formatString = (str: YaraString): string => {
     .map(([key]) => key)
     .join(' ');
 
-  return `${str.identifier} = ${str.type === 'hex' ? '{' : '"'}${str.value}${
+  let value = str.value;
+  if (str.type === 'hex') {
+    // Remove any extra whitespace and ensure pairs of hex digits
+    value = value.replace(/\s+/g, '').match(/.{2}/g)?.join(' ') || value;
+  }
+
+  return `${str.identifier} = ${str.type === 'hex' ? '{' : '"'}${value}${
     str.type === 'hex' ? '}' : '"'
   }${modifiers ? ' ' + modifiers : ''}`;
 };
 
 const formatCondition = (condition: YaraCondition, index: number): string => {
-  const operator = index === 0 ? '' : condition.operator + ' ';
+  let operator = '';
+  if (index > 0) {
+    operator = condition.operator === 'not' ? 'and not ' : condition.operator + ' ';
+  } else if (condition.operator === 'not') {
+    operator = 'not ';
+  }
   
   switch (condition.type) {
     case 'string':
@@ -20,7 +31,7 @@ const formatCondition = (condition: YaraCondition, index: number): string => {
     case 'filesize':
       return `${operator}filesize ${condition.value}`;
     case 'custom':
-      return `${operator}${condition.value}`;
+      return `${operator}(${condition.value})`;
     default:
       return '';
   }

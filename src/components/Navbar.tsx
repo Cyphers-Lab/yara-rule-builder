@@ -28,6 +28,12 @@ const Navbar = () => {
         >
           Rule Builder
         </Button>
+        <Button 
+          color="inherit" 
+          onClick={() => navigate('/repository')}
+        >
+          Repository
+        </Button>
       </Toolbar>
     </AppBar>
   );

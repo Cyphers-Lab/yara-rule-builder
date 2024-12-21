@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Box,
   Button,
@@ -16,9 +17,12 @@ import StringDefinition from '../components/StringDefinition';
 import ConditionBuilder from '../components/ConditionBuilder';
 import RulePreview from '../components/RulePreview';
 import { YaraRule, YaraString, YaraCondition } from '../types/yara';
-import { generateYaraRule, validateYaraRule } from '../utils/yaraGenerator';
+import { generateYaraRule } from '../utils/yaraGenerator';
+import { validateRuleInRealTime } from '../utils/yaraValidator';
+import TestingInterface from '../components/TestingInterface';
 
 const BuilderPage = () => {
+  const location = useLocation();
   const [rule, setRule] = useState<YaraRule>({
     name: '',
     tags: [],
@@ -33,7 +37,135 @@ const BuilderPage = () => {
   });
 
   const [newTag, setNewTag] = useState('');
-  const [errors, setErrors] = useState<string[]>([]);
+  const [validationResult, setValidationResult] = useState<{isValid: boolean; errors: Array<{field: string; message: string}>}>({
+    isValid: true,
+    errors: []
+  });
+
+  const parseImportedRule = (content: string) => {
+    const strings: YaraString[] = [];
+    const conditions: YaraCondition[] = [];
+    let tags: string[] = [];
+
+    // Extract strings section
+    const stringsMatch = content.match(/strings:([\s\S]*?)condition:/);
+    if (stringsMatch) {
+      const stringsSection = stringsMatch[1].trim();
+      const stringLines = stringsSection.split('\n');
+      
+      stringLines.forEach((line) => {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine.startsWith('//')) return;
+        
+        // Handle hex strings with spaces and text strings with quotes
+        const stringMatch = trimmedLine.match(/\$(\w+)\s*=\s*(?:{([^}]+)}|"([^"]+)")(?:\s+([a-z\s]+))?/);
+        if (stringMatch) {
+          const [_, identifier, hexValue, textValue, modifiersStr] = stringMatch;
+          const modifiers: Record<string, boolean> = {};
+          
+          if (modifiersStr) {
+            const modifiersList = modifiersStr.trim().split(/\s+/);
+            modifiersList.forEach(mod => {
+              modifiers[mod] = true;
+            });
+          }
+
+          strings.push({
+            id: uuidv4(),
+            identifier,
+            value: hexValue || textValue,
+            type: hexValue ? 'hex' : 'text',
+            modifiers,
+          });
+        }
+      });
+    }
+
+    // Extract condition section
+    const conditionMatch = content.match(/condition:([\s\S]*?)(?=(?:^rule|\s*$))/m);
+    if (conditionMatch) {
+      const conditionText = conditionMatch[1].trim();
+      
+      // Handle more complex conditions
+      const conditionParts = conditionText
+        .replace(/\band\b/gi, '\nand\n')
+        .replace(/\bor\b/gi, '\nor\n')
+        .replace(/\bnot\b/gi, '\nnot\n')
+        .split('\n')
+        .map(part => part.trim())
+        .filter(Boolean);
+      
+      let currentOperator: 'and' | 'or' | 'not' | undefined;
+      
+      conditionParts.forEach((part, index) => {
+        const lowerPart = part.toLowerCase();
+        
+        if (lowerPart === 'and' || lowerPart === 'or' || lowerPart === 'not') {
+          currentOperator = lowerPart as 'and' | 'or' | 'not';
+        } else {
+          let type: 'string' | 'filesize' | 'custom' = 'custom';
+          let value = part;
+
+          if (part.startsWith('$')) {
+            type = 'string';
+          } else if (part.includes('filesize')) {
+            type = 'filesize';
+            value = part.replace('filesize', '').trim();
+          }
+
+          conditions.push({
+            id: uuidv4(),
+            type,
+            value,
+            operator: index === 0 ? undefined : currentOperator
+          });
+        }
+      });
+    }
+
+    // Extract tags
+    const tagsMatch = content.match(/rule\s+\w+\s*:\s*([\w\s]+)\s*{/);
+    if (tagsMatch && tagsMatch[1]) {
+      tags = tagsMatch[1].trim().split(/\s+/);
+    }
+
+    return { strings, conditions, tags };
+  };
+
+  useEffect(() => {
+    // Handle imported rule if available
+    if (location.state?.importedRule) {
+      const importedRule = location.state.importedRule;
+      try {
+        const ruleName = importedRule.name.replace(/\.ya?ra?$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
+        const { strings, conditions, tags } = parseImportedRule(importedRule.content);
+        
+        // Initialize the new rule
+        const newRule: YaraRule = {
+          name: ruleName,
+          tags: tags,
+          meta: {
+            author: '',
+            description: `Imported from ${importedRule.path}`,
+            date: new Date().toISOString().split('T')[0],
+            version: '1.0',
+          },
+          strings: strings,
+          conditions: conditions,
+        };
+
+        // Set the rule
+        setRule(newRule);
+      } catch (error) {
+        console.error('Error parsing imported rule:', error);
+      }
+    }
+  }, [location.state]);
+
+  useEffect(() => {
+    const result = validateRuleInRealTime(rule);
+    setValidationResult(result);
+  }, [rule]);
 
   const handleAddString = () => {
     setRule({
@@ -124,20 +256,14 @@ const BuilderPage = () => {
     });
   };
 
-  const handleValidate = () => {
-    const validationErrors = validateYaraRule(rule);
-    setErrors(validationErrors);
-    return validationErrors.length === 0;
-  };
-
   const handleCopyRule = () => {
-    if (handleValidate()) {
+    if (validationResult.isValid) {
       navigator.clipboard.writeText(generateYaraRule(rule));
     }
   };
 
   const handleDownloadRule = () => {
-    if (handleValidate()) {
+    if (validationResult.isValid) {
       const blob = new Blob([generateYaraRule(rule)], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -156,12 +282,12 @@ const BuilderPage = () => {
         YARA Rule Builder
       </Typography>
 
-      {errors.length > 0 && (
+      {validationResult.errors.length > 0 && (
         <Alert severity="error" sx={{ mb: 3 }}>
           <Typography variant="subtitle1">Please fix the following errors:</Typography>
           <ul style={{ margin: 0 }}>
-            {errors.map((error, index) => (
-              <li key={index}>{error}</li>
+            {validationResult.errors.map((error, index) => (
+              <li key={index}>{error.message}</li>
             ))}
           </ul>
         </Alert>
@@ -278,6 +404,7 @@ const BuilderPage = () => {
         </Grid>
 
         <Grid item xs={12}>
+          <TestingInterface rule={rule} />
           <Typography variant="h6" gutterBottom>
             Preview
           </Typography>
